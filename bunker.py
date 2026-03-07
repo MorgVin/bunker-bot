@@ -1,22 +1,32 @@
 import random
 import requests
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
-# ────────────────────────────────────────────────
-# НАСТРОЙКИ
-# ────────────────────────────────────────────────
-
 TOKEN = '8350952541:AAEJ2DtxbvIfGxin9NaR65lMANBxNlnm_1U'
 HOST_CHAT_ID = 6208445194
-SITE_URL = 'https://bunker-gg7v.onrender.com/api/open_card'  # ← ОБЯЗАТЕЛЬНО замени на свой реальный адрес от Render!
-REQUEST_TIMEOUT = 60  # увеличенный таймаут для Render Free (просыпается медленно)
+SITE_URL = 'https://bunker-gg7v.onrender.com/api/open_card'  
+REQUEST_TIMEOUT = 60
 
 MIN_PLAYERS_TO_FINISH = 3
 
-# ────────────────────────────────────────────────
-# СПИСКИ КАРТ (твои полные списки)
-# ────────────────────────────────────────────────
+CATASTROPHE_IMAGES = {
+    'Ядерная война: высокий уровень радиации, разрушенная инфраструктура, дефицит пищи и воды.': '/static/catastrophes/nuclear.jpg',
+    'Пандемия смертельного вируса: высокая заразность, нужны медики и антибиотики, иммунитет критичен.': '/static/catastrophes/pandemic.jpg',
+    'Зомби-апокалипсис: орды нежити, нужны оружие и навыки выживания, здоровье важно.': '/static/catastrophes/zombie.jpg',
+    'Глобальное потепление и наводнения: затопленные земли, нужны инженеры и фермеры.': '/static/catastrophes/flood.jpg',
+    'Падение астероида: пыль в атмосфере, холод, дефицит света — нужны семена и садоводство.': '/static/catastrophes/asteroid.jpg',
+    'Инопланетное вторжение: враждебные пришельцы, нужны военные и технологии.': '/static/catastrophes/alien.jpg',
+    'Супервулкан: пепел в небе, ядерная зима, нужны запасы еды и тепла.': '/static/catastrophes/volcano.jpg',
+    'Кибератака: отключение электричества, нужны программисты и генераторы.': '/static/catastrophes/cyber.jpg',
+    'Химическая катастрофа: токсичные облака, нужны противогазы и химики.': '/static/catastrophes/chemical.jpg',
+    'Землетрясения и цунами: разрушенные города, нужны строители и медики.': '/static/catastrophes/tsunami.jpg',
+    'Магнитный сдвиг полюсов: хаос в навигации, радиация, нужны ученые.': '/static/catastrophes/magnetic.jpg',
+    'Биологическая война: мутировавшие организмы, нужны биологи и вакцины.': '/static/catastrophes/bio_war.jpg',
+    'default': '/static/catastrophes/default.jpg'
+}
+
 GENDERS_AGES = [
     'Мужчина, 19 лет', 'Женщина, 22 года', 'Мужчина, 28 лет', 'Женщина, 31 год',
     'Мужчина, 34 года', 'Женщина, 37 лет', 'Мужчина, 42 года', 'Женщина, 45 лет',
@@ -116,20 +126,13 @@ CATASTROPHES = [
     'Биологическая война: мутировавшие организмы, нужны биологи и вакцины.'
 ]
 
-# ────────────────────────────────────────────────
-# СОСТОЯНИЕ
-# ────────────────────────────────────────────────
 
-players = {}
-player_statuses = {}
-generated_profiles = {}
+players = {}                  # player_id: nickname
+player_statuses = {}          # player_id: 'active'/'eliminated'
+generated_profiles = {}       # player_id: profile_text
 current_catastrophe = None
 game_active = True
-cards_dealt = False  # флаг: раздача уже была?
-
-# ────────────────────────────────────────────────
-# ФУНКЦИИ ОЦЕНКИ (без изменений)
-# ────────────────────────────────────────────────
+cards_dealt = False
 
 def get_profession_score(prof: str) -> int:
     high = ['Врач', 'Хирург', 'Медсестра', 'Фельдшер', 'Агроном', 'Ветеринар', 'Военный', 'Полицейский', 'Инженер', 'Сварщик', 'Автомеханик']
@@ -199,10 +202,6 @@ def calculate_survival_chance(gender_age, profession, health, baggage, hobby, se
     else: desc = "критически низкий"
     return score, desc
 
-# ────────────────────────────────────────────────
-# КОМАНДЫ
-# ────────────────────────────────────────────────
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global game_active
 
@@ -223,13 +222,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(
             f"Привет, {username}!\n"
             f"Ты зарегистрирован (номер {count}).\n"
-            f"Ждём ведущего."
+            f"Ждём ведущего.\n"
+            f"Установить свой ник: /set_nick <ник>"
         )
 
         await context.bot.send_message(
             chat_id=HOST_CHAT_ID,
             text=f"➕ Новый игрок: @{username}\nАктивных: {count}"
         )
+
+        init_data = {
+            "player_id": str(user_id),
+            "username": username,
+            "action": "init"
+        }
+        try:
+            r = requests.post(SITE_URL, json=init_data, timeout=REQUEST_TIMEOUT)
+            print(f"Авто-инициализация {username}: {r.status_code}")
+        except Exception as e:
+            print(f"Ошибка авто-инициализации: {e}")
 
         if count >= MIN_PLAYERS_TO_FINISH:
             await context.bot.send_message(
@@ -239,6 +250,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     else:
         await update.message.reply_text(f"Ты уже зарегистрирован.")
+
+async def set_nick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+
+    if not context.args:
+        await update.message.reply_text("Пример: /set_nick НовыйНик")
+        return
+
+    new_nick = ' '.join(context.args).strip()
+
+    if len(new_nick) < 3 or len(new_nick) > 20:
+        await update.message.reply_text("Ник от 3 до 20 символов.")
+        return
+
+    if user_id not in players:
+        await update.message.reply_text("Сначала /start")
+        return
+
+    old_nick = players[user_id]
+    players[user_id] = new_nick
+
+    await update.message.reply_text(f"Ник изменён на {new_nick}.")
+
+    await context.bot.send_message(
+        HOST_CHAT_ID,
+        f"Игрок {old_nick} → {new_nick} (ID {user_id})"
+    )
+
+    update_data = {
+        "player_id": str(user_id),
+        "username": new_nick,
+        "action": "update_nick"
+    }
+    try:
+        r = requests.post(SITE_URL, json=update_data, timeout=REQUEST_TIMEOUT)
+        print(f"Обновление ника {new_nick}: {r.status_code}")
+    except Exception as e:
+        print(f"Ошибка обновления ника: {e}")
 
 async def deal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != HOST_CHAT_ID:
@@ -254,23 +303,31 @@ async def deal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global generated_profiles, current_catastrophe, cards_dealt
     generated_profiles = {}
     current_catastrophe = random.choice(CATASTROPHES)
-    cards_dealt = True  # после раздачи ведущий фиксируется
+    cards_dealt = True
 
-    # Инициализация карточек на сайте
+    # катастрофа
+    cat_image = CATASTROPHE_IMAGES.get(current_catastrophe, CATASTROPHE_IMAGES['default'])
+    cat_data = {
+        "action": "set_catastrophe",
+        "catastrophe": current_catastrophe,
+        "catastrophe_image": cat_image
+    }
+    try:
+        r = requests.post(SITE_URL, json=cat_data, timeout=REQUEST_TIMEOUT)
+        print(f"Отправка катастрофы на сайт: статус {r.status_code} - {r.text}")
+    except Exception as e:
+        print(f"Ошибка отправки катастрофы: {e}")
+
+    # инициализация + генерация
     for player_id, username in players.items():
-        init_data = {
-            "player_id": str(player_id),
-            "username": username,
-            "action": "init"
-        }
+        # Init
+        init_data = {"player_id": str(player_id), "username": username, "action": "init"}
         try:
-            r = requests.post(SITE_URL, json=init_data, timeout=REQUEST_TIMEOUT)
-            print(f"Инициализация {username}: статус {r.status_code}")
+            requests.post(SITE_URL, json=init_data, timeout=REQUEST_TIMEOUT)
         except Exception as e:
-            print(f"Ошибка инициализации {username}: {e}")
+            print(f"Ошибка init для {username}: {e}")
 
-    # Генерация и отправка профилей
-    for player_id, username in players.items():
+        # генерация профиля
         gender_age = random.choice(GENDERS_AGES)
         profession = random.choice(PROFESSIONS)
         health     = random.choice(HEALTHS)
@@ -281,31 +338,35 @@ async def deal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         chance, desc = calculate_survival_chance(gender_age, profession, health, baggage, hobby, secret)
 
         profile_text = (
-            f"🧑‍🚀 Твоя карточка ({username})\n\n"
-            f"Пол / Возраст: {gender_age}\n"
-            f"Профессия:     {profession}\n"
-            f"Здоровье:      {health}\n"
-            f"Багаж:         {baggage}\n"
-            f"Хобби / Навык: {hobby}\n"
-            f"Секрет:        {secret}\n\n"
-            f"**Шанс выживания: {chance}% ({desc})**"
+            f"<b>🧑‍🚀 Твоя карточка ({username})</b>\n\n"
+            f"<b>Пол / Возраст:</b> {gender_age}\n"
+            f"<b>Профессия:</b>     {profession}\n"
+            f"<b>Здоровье:</b>      {health}\n"
+            f"<b>Багаж:</b>         {baggage}\n"
+            f"<b>Хобби / Навык:</b> {hobby}\n"
+            f"<b>Секрет:</b>        {secret}\n\n"
+            f"<b>Шанс выживания:</b> {chance}% ({desc})"
         )
 
         generated_profiles[player_id] = profile_text
 
-        try:
-            await context.bot.send_message(player_id, profile_text, parse_mode='Markdown')
-        except:
-            await context.bot.send_message(HOST_CHAT_ID, f"⚠️ Не отправлен профиль {username}")
+        sent = False
+        for attempt in range(3):
+            try:
+                await context.bot.send_message(player_id, profile_text, parse_mode='HTML')
+                sent = True
+                break
+            except Exception as e:
+                print(f"Попытка {attempt+1} отправки {username}: {e}")
+                await asyncio.sleep(2)
+
+        if not sent:
+            await context.bot.send_message(HOST_CHAT_ID, f"⚠️ НЕ УДАЛОСЬ отправить профиль {username} (ID {player_id})")
 
     await context.bot.send_message(
         HOST_CHAT_ID,
         f"Раздача завершена ✓\n**Катастрофа:** {current_catastrophe}\nВсего профилей: {len(players)}"
     )
-
-# ────────────────────────────────────────────────
-# СТАТЬ ВЕДУЩИМ
-# ────────────────────────────────────────────────
 
 async def become_host(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     global HOST_CHAT_ID
@@ -321,7 +382,6 @@ async def become_host(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text("Сначала зарегистрируйся: /start")
         return
 
-    # Ограничение: стать ведущим можно только до раздачи карт
     global cards_dealt
     if cards_dealt:
         await update.message.reply_text("Роль ведущего фиксируется после раздачи карт (/deal).")
@@ -336,25 +396,20 @@ async def become_host(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         f"🔥 Новый ведущий!\n"
         f"@{username} (ID {user_id}) захватил роль ведущего\n"
         f"Предыдущий ведущий: @{old_username} (ID {old_host})\n\n"
-        f"Теперь только ты можешь управлять игрой: /deal, /kick, /finish и т.д."
+        f"Теперь только ты можешь управлять игрой."
     )
 
     await update.message.reply_text(msg)
 
-    # Личка новому ведущему
     try:
         await context.bot.send_message(
             user_id,
             f"Ты теперь ведущий!\n"
-            f"Команды: /deal, /kick <id>, /unban <id>, /list, /finish, /reset\n"
-            f"Удачи вести игру! 😎"
+            f"Команды: /deal, /kick <@ник или id>, /unban <@ник или id>, /list, /finish, /reset\n"
+            f"Удачи вести игру!"
         )
     except:
         pass
-
-# ────────────────────────────────────────────────
-# ОСТАЛЬНЫЕ КОМАНДЫ (без изменений)
-# ────────────────────────────────────────────────
 
 async def open_category(update: Update, context: ContextTypes.DEFAULT_TYPE, key: str, label: str) -> None:
     user_id = update.effective_user.id
@@ -364,7 +419,7 @@ async def open_category(update: Update, context: ContextTypes.DEFAULT_TYPE, key:
         return
 
     if user_id not in generated_profiles:
-        await update.message.reply_text("Карточка ещё не сгенерирована. Жди /deal")
+        await update.message.reply_text("Карточка не найдена. Жди /deal или обратись к ведущему.")
         return
 
     profile_text = generated_profiles[user_id]
@@ -384,14 +439,14 @@ async def open_category(update: Update, context: ContextTypes.DEFAULT_TYPE, key:
         "username": players[user_id],
         "category": key,
         "label": label,
-        "value": value
+        "value": value,
+        "action": "update_category"
     }
-
     try:
         r = requests.post(SITE_URL, json=card_data, timeout=REQUEST_TIMEOUT)
-        print(f"Отправка {label} для {players[user_id]}: статус {r.status_code}")
+        print(f"Обновление категории {label}: {r.status_code}")
     except Exception as e:
-        print(f"Ошибка отправки на сайт: {e}")
+        print(f"Ошибка обновления категории: {e}")
 
 async def kick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != HOST_CHAT_ID:
@@ -399,29 +454,55 @@ async def kick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if not context.args:
-        await update.message.reply_text("Пример: /kick 123456789")
+        await update.message.reply_text("Пример: /kick @ник или /kick 123456789")
         return
 
-    try:
-        target_id = int(context.args[0])
-        if target_id not in players:
-            await update.message.reply_text("Игрок не найден.")
+    arg = context.args[0].strip()
+
+    target_id = None
+
+    if arg.startswith('@'):
+        nick = arg[1:].lower()
+        for pid, uname in players.items():
+            if uname.lower() == nick:
+                target_id = pid
+                break
+        if not target_id:
+            await update.message.reply_text("Игрок с таким ником не найден.")
+            return
+    else:
+        try:
+            target_id = int(arg)
+            if target_id not in players:
+                await update.message.reply_text("Игрок не найден по ID.")
+                return
+        except ValueError:
+            await update.message.reply_text("Неверный формат: @ник или ID числом.")
             return
 
-        player_statuses[target_id] = 'eliminated'
-        username = players[target_id]
+    player_statuses[target_id] = 'eliminated'
+    username = players[target_id]
 
-        try:
-            await context.bot.send_message(
-                target_id,
-                "❌ Ты был выгнан из бункера.\nВедущий исключил тебя из игры.\nСпасибо за участие!"
-            )
-        except:
-            await context.bot.send_message(HOST_CHAT_ID, f"Не удалось уведомить {username} (id {target_id})")
+    try:
+        await context.bot.send_message(
+            target_id,
+            "❌ Ты был выгнан из бункера.\nВедущий исключил тебя из игры.\nСпасибо за участие!"
+        )
+    except:
+        await context.bot.send_message(HOST_CHAT_ID, f"Не удалось уведомить {username} (id {target_id})")
 
-        await update.message.reply_text(f"{username} выгнан.")
-    except ValueError:
-        await update.message.reply_text("ID должен быть числом.")
+    # игрок кикнут
+    kick_data = {
+        "player_id": str(target_id),
+        "action": "kick_player"
+    }
+    try:
+        r = requests.post(SITE_URL, json=kick_data, timeout=REQUEST_TIMEOUT)
+        print(f"Отправка кика игрока {target_id}: статус {r.status_code}")
+    except Exception as e:
+        print(f"Ошибка отправки кика: {e}")
+
+    await update.message.reply_text(f"{username} выгнан.")
 
 async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != HOST_CHAT_ID:
@@ -429,29 +510,44 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if not context.args:
-        await update.message.reply_text("Пример: /unban 123456789")
+        await update.message.reply_text("Пример: /unban @ник или /unban 123456789")
         return
 
-    try:
-        target_id = int(context.args[0])
-        if target_id not in players:
-            await update.message.reply_text("Игрок не найден.")
+    arg = context.args[0].strip()
+
+    target_id = None
+
+    if arg.startswith('@'):
+        nick = arg[1:].lower()
+        for pid, uname in players.items():
+            if uname.lower() == nick:
+                target_id = pid
+                break
+        if not target_id:
+            await update.message.reply_text("Игрок с таким ником не найден.")
+            return
+    else:
+        try:
+            target_id = int(arg)
+            if target_id not in players:
+                await update.message.reply_text("Игрок не найден по ID.")
+                return
+        except ValueError:
+            await update.message.reply_text("Неверный формат: @ник или ID числом.")
             return
 
-        player_statuses[target_id] = 'active'
-        username = players[target_id]
+    player_statuses[target_id] = 'active'
+    username = players[target_id]
 
-        try:
-            await context.bot.send_message(
-                target_id,
-                "✅ Ты возвращён в игру!\nВедущий передумал."
-            )
-        except:
-            pass
+    try:
+        await context.bot.send_message(
+            target_id,
+            "✅ Ты возвращён в игру!\nВедущий передумал."
+        )
+    except:
+        pass
 
-        await update.message.reply_text(f"{username} возвращён.")
-    except ValueError:
-        await update.message.reply_text("ID должен быть числом.")
+    await update.message.reply_text(f"{username} возвращён.")
 
 async def list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != HOST_CHAT_ID:
@@ -524,37 +620,51 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     current_catastrophe = None
     game_active = True
     cards_dealt = False
+
+    # Очистка на сайте
+    clear_data = {"action": "clear_all"}
+    try:
+        r = requests.post(SITE_URL, json=clear_data, timeout=REQUEST_TIMEOUT)
+        print(f"Очистка сайта: статус {r.status_code}")
+    except Exception as e:
+        print(f"Ошибка очистки сайта: {e}")
+
     await update.message.reply_text("Игра полностью сброшена. Новый ведущий может быть выбран командой /host.")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id != HOST_CHAT_ID:
-        await update.message.reply_text("Только ведущий.")
-        return
-
+async def help_player(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "Команды:\n"
+        "Команды для игроков:\n"
         "/start — регистрация\n"
-        "/deal — раздать карты\n"
-        "/host — стать ведущим (до раздачи)\n"
-        "/gender — открыть Пол/Возраст\n"
-        "/profession — открыть Профессию\n"
-        "/health — открыть Здоровье\n"
-        "/baggage — открыть Багаж\n"
-        "/hobby — открыть Хобби\n"
-        "/secret — открыть Секрет\n"
-        "/chance — открыть Шанс\n"
-        "/kick <id> — выгнать\n"
-        "/unban <id> — вернуть\n"
-        "/list — список\n"
-        "/finish — завершить\n"
-        "/reset — сброс\n"
-        "/help — справка"
+        "/set_nick <ник> — установить свой ник\n"
+        "/host — стать ведущим (до /deal)\n"
+        "gender — открыть Пол/Возраст\n"
+        "profession — открыть Профессия\n"
+        "health — открыть Здоровье\n"
+        "baggage — открыть Багаж\n"
+        "hobby — открыть Хобби\n"
+        "secret — открыть Секрет\n"
+        "chance — открыть Шанс\n"
+        "/help_player — эта справка"
     )
     await update.message.reply_text(text)
 
-# ────────────────────────────────────────────────
-# ОДНОСЛОВНЫЕ КАТЕГОРИИ (baggage, health и т.д.)
-# ────────────────────────────────────────────────
+async def help_host(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_user.id != HOST_CHAT_ID:
+        await update.message.reply_text("Эта команда только для ведущего.")
+        return
+
+    text = (
+        "Команды ведущего:\n"
+        "/deal — раздать карты\n"
+        "/kick <@ник или id> — выгнать\n"
+        "/unban <@ник или id> — вернуть\n"
+        "/list — список игроков\n"
+        "/finish — завершить игру\n"
+        "/reset — сброс игры\n"
+        "/help_host — эта справка\n"
+        "/help_player — справка для игроков"
+    )
+    await update.message.reply_text(text)
 
 async def open_by_word(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text.strip().lower()
@@ -573,25 +683,22 @@ async def open_by_word(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         key, label = mapping[text]
         await open_category(update, context, key, label)
 
-# ────────────────────────────────────────────────
-# ЗАПУСК
-# ────────────────────────────────────────────────
-
 def main():
     application = Application.builder().token(TOKEN).build()
 
-    # Команды с /
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("set_nick", set_nick))
+    application.add_handler(CommandHandler("host", become_host))
     application.add_handler(CommandHandler("deal", deal))
     application.add_handler(CommandHandler("kick", kick))
     application.add_handler(CommandHandler("unban", unban))
     application.add_handler(CommandHandler("list", list))
     application.add_handler(CommandHandler("finish", finish))
     application.add_handler(CommandHandler("reset", reset))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("host", become_host))
+    application.add_handler(CommandHandler("help_host", help_host))
+    application.add_handler(CommandHandler("help_player", help_player))
+    application.add_handler(CommandHandler("help", help_host))
 
-    # Однословные категории без слеша
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, open_by_word))
 
     print("Бот запущен...")
